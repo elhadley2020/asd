@@ -89,8 +89,8 @@ def place_order(pair, units, stop_price, take_profit_price):
             "timeInForce": "FOK",
             "type": "MARKET",
             "positionFill": "DEFAULT",
-            "stopLossOnFill": {"price": str(stop_price)},
-            "takeProfitOnFill": {"price": str(take_profit_price)}
+            "stopLossOnFill": {"price": format_price(pair, stop_price)},
+            "takeProfitOnFill": {"price": format_price(pair, take_profit_price)}
         }
     }
 
