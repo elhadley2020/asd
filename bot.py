@@ -26,6 +26,13 @@ HEADERS = {
 # HELPER FUNCTIONS
 # =======================
 
+
+def format_price(pair, price):
+    if "JPY" in pair:
+        return f"{price:.3f}"
+    else:
+        return f"{price:.5f}"
+
 def fetch_candles(pair, count=300, granularity="H1"):
     url = f"{BASE_URL}/instruments/{pair}/candles"
     params = {"count": count, "granularity": granularity, "price": "M"}
