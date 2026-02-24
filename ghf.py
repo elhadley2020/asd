@@ -1,6 +1,7 @@
 import requests
 import pandas as pd
 import time
+import json
 
 # -----------------------------
 # OANDA Setup
@@ -8,7 +9,7 @@ import time
 OANDA_TOKEN = "YOUR_OANDA_API_TOKEN"
 ACCOUNT_ID = "YOUR_ACCOUNT_ID"
 BASE_URL = "https://api-fxpractice.oanda.com/v3"
-HEADERS = {"Authorization": f"Bearer {OANDA_TOKEN}"}
+HEADERS = {"Authorization": f"Bearer {OANDA_TOKEN}", "Content-Type": "application/json"}
 
 # -----------------------------
 # Get Candles
@@ -16,17 +17,22 @@ HEADERS = {"Authorization": f"Bearer {OANDA_TOKEN}"}
 def get_candles(instrument="EUR_USD", granularity="S15", count=500):
     url = f"{BASE_URL}/instruments/{instrument}/candles"
     params = {"granularity": granularity, "count": count, "price": "M"}
-    r = requests.get(url, headers=HEADERS, params=params)
-    data = r.json()['candles']
-    df = pd.DataFrame([{
-        "time": c['time'],
-        "open": float(c['mid']['o']),
-        "high": float(c['mid']['h']),
-        "low": float(c['mid']['l']),
-        "close": float(c['mid']['c'])
-    } for c in data])
-    df['time'] = pd.to_datetime(df['time'])
-    return df
+    try:
+        r = requests.get(url, headers=HEADERS, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()['candles']
+        df = pd.DataFrame([{
+            "time": c['time'],
+            "open": float(c['mid']['o']),
+            "high": float(c['mid']['h']),
+            "low": float(c['mid']['l']),
+            "close": float(c['mid']['c'])
+        } for c in data])
+        df['time'] = pd.to_datetime(df['time'])
+        return df
+    except Exception as e:
+        print(f"Error fetching candles for {instrument}: {e}")
+        return pd.DataFrame()
 
 # -----------------------------
 # Indicators
@@ -51,6 +57,8 @@ def is_sideways(row, threshold=0.00001):
 # Strategy Logic
 # -----------------------------
 def strategy(df, position):
+    if df.empty or len(df) < 2:
+        return None
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
@@ -59,71 +67,104 @@ def strategy(df, position):
 
     trend = "bullish" if last['close'] > last['ema200'] else "bearish"
 
-    # LONG ENTRY
     if trend == "bullish" and position is None:
         if last['macd_hist'] > 0 and last['macd_hist'] > prev['macd_hist']:
             return "enter_long"
-
-    # SHORT ENTRY
     if trend == "bearish" and position is None:
         if last['macd_hist'] < 0 and last['macd_hist'] < prev['macd_hist']:
             return "enter_short"
-
-    # LONG EXIT
     if position == "long" and last['macd_hist'] < prev['macd_hist']:
         return "exit"
-
-    # SHORT EXIT
     if position == "short" and last['macd_hist'] > prev['macd_hist']:
         return "exit"
-
     return None
+
+# -----------------------------
+# OANDA Market Order Functions
+# -----------------------------
+def place_order(instrument, units):
+    """Place a market order. Positive units = buy, negative = sell"""
+    url = f"{BASE_URL}/accounts/{ACCOUNT_ID}/orders"
+    data = {
+        "order": {
+            "units": str(units),
+            "instrument": instrument,
+            "timeInForce": "FOK",
+            "type": "MARKET",
+            "positionFill": "DEFAULT"
+        }
+    }
+    try:
+        r = requests.post(url, headers=HEADERS, data=json.dumps(data))
+        r.raise_for_status()
+        resp = r.json()
+        print(f"Order placed: {resp}")
+        return True
+    except Exception as e:
+        print(f"Error placing order for {instrument}: {e}")
+        return False
+
+def close_position(instrument):
+    """Close all positions for the given instrument"""
+    url = f"{BASE_URL}/accounts/{ACCOUNT_ID}/positions/{instrument}/close"
+    data = {"longUnits": "ALL", "shortUnits": "ALL"}
+    try:
+        r = requests.put(url, headers=HEADERS, data=json.dumps(data))
+        r.raise_for_status()
+        resp = r.json()
+        print(f"Position closed: {resp}")
+        return True
+    except Exception as e:
+        print(f"Error closing position for {instrument}: {e}")
+        return False
 
 # -----------------------------
 # Live Bot Loop (Single Position)
 # -----------------------------
 position = None
-current_instrument = "EUR_USD"  # example starting instrument
-instruments_list = ["EUR_USD", "GBP_USD", "USD_JPY", "XAU_USD"]  # add more
+current_instrument = None
+units_size = 1000  # 0.01 standard lot
+
+instruments_list = ["EUR_USD", "GBP_USD", "USD_JPY", "XAU_USD"]
 
 while True:
+    try:
+        # Iterate over instruments only if no open position
+        for inst in instruments_list:
+            if position is not None:
+                break
 
-    # Iterate over instruments but respect single-position rule
-    for inst in instruments_list:
+            df = get_candles(instrument=inst, granularity="S15", count=500)
+            df = add_indicators(df)
+            signal = strategy(df, position)
 
-        if position is not None:
-            # Already in trade; skip all new instruments
-            break
+            if signal == "enter_long":
+                print(f"{inst}: ENTER LONG")
+                if place_order(inst, units_size):
+                    position = "long"
+                    current_instrument = inst
+                break
 
-        df = get_candles(instrument=inst, granularity="S15", count=500)
-        df = add_indicators(df)
+            elif signal == "enter_short":
+                print(f"{inst}: ENTER SHORT")
+                if place_order(inst, -units_size):
+                    position = "short"
+                    current_instrument = inst
+                break
 
-        signal = strategy(df, position)
+        # Check exit for current position
+        if position is not None and current_instrument is not None:
+            df = get_candles(instrument=current_instrument, granularity="S15", count=500)
+            df = add_indicators(df)
+            signal = strategy(df, position)
 
-        if signal == "enter_long":
-            print(f"{inst}: ENTER LONG")
-            position = "long"
-            current_instrument = inst
-            # TODO: Place OANDA market order via requests POST
-            break
+            if signal == "exit":
+                print(f"{current_instrument}: EXIT POSITION")
+                if close_position(current_instrument):
+                    position = None
+                    current_instrument = None
 
-        elif signal == "enter_short":
-            print(f"{inst}: ENTER SHORT")
-            position = "short"
-            current_instrument = inst
-            # TODO: Place OANDA market order via requests POST
-            break
-
-    # Check for exit on current position
-    if position is not None:
-        df = get_candles(instrument=current_instrument, granularity="S15", count=500)
-        df = add_indicators(df)
-        signal = strategy(df, position)
-
-        if signal == "exit":
-            print(f"{current_instrument}: EXIT POSITION")
-            position = None
-            current_instrument = None
-            # TODO: Close OANDA position via requests PUT
+    except Exception as e:
+        print(f"Unexpected error in bot loop: {e}")
 
     time.sleep(15)
